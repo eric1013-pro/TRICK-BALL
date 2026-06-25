@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>TRICK BALL made by THRE3RIC</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #ffdaba; touch-action: none; font-family: 'Segoe UI', sans-serif; }
+        
+        /* 인트로 화면 */
+        #introScreen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(to bottom, #111, #222);
+            display: flex; flex-direction: column; justify-content: center; align-items: center; 
+            color: white; z-index: 10; transition: opacity 0.8s ease-out;
+        }
+        h1 { font-size: 3.5rem; margin: 0; letter-spacing: 3px; text-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        p { font-size: 1.2rem; color: #aaa; margin-top: 5px; margin-bottom: 40px; }
+        button {
+            padding: 15px 50px; font-size: 1.3rem; font-weight: bold; border: none;
+            border-radius: 40px; background-color: #4169E1; color: white; cursor: pointer;
+            box-shadow: 0 4px 15px rgba(65, 105, 225, 0.4); transition: 0.2s;
+        }
+        button:active { transform: scale(0.95); }
+
+        /* 게임 내부 UI 및 조작 영역 분할 시각화 */
+        #gameUI { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 5; display: none; pointer-events: none; }
+        .zone-guide { position: absolute; top: 0; height: 100%; display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.2); font-weight: bold; font-size: 1.2rem; pointer-events: auto; }
+        #leftZone { left: 0; width: 50%; border-right: 1px dashed rgba(255,255,255,0.15); }
+        #rightZone { right: 0; width: 50%; }
+
+        /* 좌측 가상 조이스틱 그래픽 UI */
+        #joystickContainer {
+            position: absolute; bottom: 50px; left: 50px; width: 120px; height: 120px;
+            background: rgba(255, 255, 255, 0.1); border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%; display: flex; justify-content: center; align-items: center;
+            pointer-events: none; opacity: 0.8; backdrop-filter: blur(2px);
+        }
+        #joystickHandle {
+            width: 50px; height: 50px; background: #4169E1; border-radius: 50%;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3); transition: transform 0.05s linear;
+        }
+
+        #instructions { position: absolute; top: 20px; left: 20px; color: #333; font-weight: bold; z-index: 6; background: rgba(255,255,255,0.6); padding: 10px; border-radius: 10px; pointer-events: none; font-size: 0.9rem; }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+</head>
+<body>
+
+    <div id="introScreen">
+        <h1>TRICK BALL</h1>
+        <p>made by THRE3RIC</p>
+        <button onclick="startGame()">START GAME</button>
+    </div>
+
+    <div id="instructions">
+        [PC] 이동: WASD, 방향키 / 시선: 마우스 드래그<br>
+        [모바일] 이동: 좌측 조이스틱 / 시선: 우측 화면 드래그
+    </div>
+
+    <div id="gameUI">
+        <div id="leftZone" class="zone-guide">
+            <div id="joystickContainer">
+                <div id="joystickHandle"></div>
+            </div>
+            <span>[ 이동 조이스틱 영역 ]</span>
+        </div>
+        <div id="rightZone" class="zone-guide">
+            <span>[ 시야 회전 영역 ]</span>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer;
+        let world, ballBody, ballMesh;
+        let isGameStarted = false;
+
+        // 3인칭 카메라 설정 변수
+        let camRadius = 15;
+        let camTheta = 0; 
+        let camPhi = Math.PI / 3.5; // 공이 아주 잘 보이도록 약간 높은 각도로 셋팅
+        
+        // 조작값 데이터
+        let moveForce = { x: 0, y: 0 };
+        let keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false, w: false, a: false, s: false, d: false };
+        
+        // 조작 드래그용 상태 관리 변수
+        let isRightDragging = false;
+        let lastPointerPos = { x: 0, y: 0 };
+        let leftPointerId = null;
+        let leftStartPos = { x: 0, y: 0 };
+
+        const joystickHandle = document.getElementById('joystickHandle');
+
+        init();
+        animate();
+
+        function init() {
+            // 1. 3D 그래픽 환경 구축 (노을빛 하늘 공간)
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xFFDAB9); 
+            scene.fog = new THREE.FogExp2(0xFFDAB9, 0.015);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // 빛 비추기
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(30, 80, 40);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // 2. 고장 없는 순수 물리 엔진(Cannon.js) 구동
+            world = new CANNON.World();
+            world.gravity.set(0, -18, 0); // 적당히 묵직한 중력
+
+            // 3. 눈에 잘 띄는 빨간색 플레이어 공 생성 (3인칭)
+            const ballRadius = 1.2;
+            const sphereGeo = new THREE.SphereGeometry(ballRadius, 32, 32);
+            // 격자무늬 효과를 살짝 주어 구르는 느낌을 시각화
+            const sphereMat = new THREE.MeshStandardMaterial({ color: 0xe63946, roughness: 0.2, metalness: 0.5 });
+            ballMesh = new THREE.Mesh(sphereGeo, sphereMat);
+            ballMesh.castShadow = true;
+            scene.add(ballMesh);
+
+            const sphereShape = new CANNON.Sphere(ballRadius);
+            ballBody = new CANNON.Body({ mass: 5, shape: sphereShape });
+            ballBody.position.set(0, 4, 0); // 시작 위치
+            ballBody.linearDamping = 0.3; 
+            ballBody.angularDamping = 0.3;
+            world.addBody(ballBody);
+
+            // 4. 확장된 3D 액션 레이아웃 트랙 빌드
+            buildDynamicTrack();
+
+            // 5. 모바일/PC 입력장치 연결
+            setupInputSystems();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // 맵 구조물 배치 함수
+        function buildDynamicTrack() {
+            // 1구간: 출발 광장
+            createBlock(0, -1, 0, 10, 2, 10, 0x4a4e69);
+            // 2구간: 아슬아슬 트랙 외길 진입 (image_4 참고)
+            createBlock(0, -1, -15, 3, 2, 20, 0x9a8c98);
+            // 3구간: 징검다리 코스 (image_2 참고)
+            createBlock(-3, -1, -30, 3, 2, 3, 0xf2e9e1);
+            createBlock(3, -1, -36, 3, 2, 3, 0xf2e9e1);
+            createBlock(0, -1, -42, 3, 2, 3, 0xf2e9e1);
+            // 4구간: 미끄러져 내려가는 대형 나무 슬라이드 (image_3 참고)
+            createSlantedBlock(0, -5, -60, 6, 2, 24, 0xadc178, Math.PI / -9); 
+            // 5구간: 중심 잡아야 하는 초박형 파이프 레일 레벨 (image_5 참고)
+            createBlock(0, -9.5, -85, 0.8, 0.8, 24, 0xdddddd);
+            // 6구간: 최종 도달 구역
+            createBlock(0, -10, -104, 12, 2, 12, 0x52b788);
+        }
+
+        function createBlock(x, y, z, w, h, d, color) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: 0, shape: shape });
+            body.position.set(x, y, z);
+            world.addBody(body);
+        }
+
+        function createSlantedBlock(x, y, z, w, h, d, color, angleX) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.rotation.x = angleX;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: 0, shape: shape });
+            body.position.set(x, y, z);
+            body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), angleX);
+            world.addBody(body);
+        }
+
+        function setupInputSystems() {
+            // PC 키보드 이벤트
+            window.addEventListener('keydown', e => { if (keys[e.key] !== undefined) keys[e.key] = true; });
+            window.addEventListener('keyup', e => { if (keys[e.key] !== undefined) keys[e.key] = false; });
+
+            const leftZone = document.getElementById('leftZone');
+            const rightZone = document.getElementById('rightZone');
+
+            // [좌측 구역] 가상 조이스틱 터치 입력 구동
+            leftZone.addEventListener('pointerdown', e => {
+                leftPointerId = e.pointerId;
+                leftStartPos = { x: e.clientX, y: e.clientY };
+            });
+            
+            leftZone.addEventListener('pointermove', e => {
+                if (leftPointerId === e.pointerId) {
+                    const dragX = e.clientX - leftStartPos.x;
+                    const dragY = e.clientY - leftStartPos.y;
+                    const distance = Math.sqrt(dragX * dragX + dragY * dragY);
+                    const maxLimit = 50; // 조이스틱 최대 반경
+
+                    let clampedX = dragX;
+                    let clampedY = dragY;
+
+                    if (distance > maxLimit) {
+                        clampedX = (dragX / distance) * maxLimit;
+                        clampedY = (dragY / distance) * maxLimit;
+                    }
+
+                    // 가상 조이스틱 버튼 움직이기
+                    joystickHandle.style.transform = `translate(${clampedX}px, ${clampedY}px)`;
+
+                    // 실제 공을 움직일 물리 힘 비율 세팅
+                    moveForce.x = clampedX / maxLimit;
+                    moveForce.y = clampedY / maxLimit;
+                }
+            });
+
+            const resetJoystick = e => {
+                if (leftPointerId === e.pointerId) {
+                    leftPointerId = null;
+                    moveForce = { x: 0, y: 0 };
+                    joystickHandle.style.transform = `translate(0px, 0px)`; // 원위치 복귀
+                }
+            };
+            leftZone.addEventListener('pointerup', resetJoystick);
+            leftZone.addEventListener('pointercancel', resetJoystick);
+
+            // [우측 구역 및 PC전체] 마우스/터치 시야 회전
+            window.addEventListener('pointerdown', e => {
+                if(e.clientX > window.innerWidth / 2 || !isGameStarted) {
+                    isRightDragging = true;
+                    lastPointerPos = { x: e.clientX, y: e.clientY };
+                }
+            });
+            
+            window.addEventListener('pointermove', e => {
+                if (isRightDragging) {
+                    const deltaX = e.clientX - lastPointerPos.x;
+                    const deltaY = e.clientY - lastPointerPos.y;
+                    camTheta -= deltaX * 0.006;
+                    camPhi -= deltaY * 0.006;
+                    camPhi = Math.max(0.1, Math.min(Math.PI / 2.3, camPhi)); // 지면 뚫기 방지
+                    lastPointerPos = { x: e.clientX, y: e.clientY };
+                }
+            });
+            window.addEventListener('pointerup', () => isRightDragging = false);
+        }
+
+        function startGame() {
+            const intro = document.getElementById('introScreen');
+            intro.style.opacity = '0';
+            setTimeout(() => {
+                intro.style.display = 'none';
+                document.getElementById('gameUI').style.display = 'block';
+                isGameStarted = true;
+            }, 800);
+        }
+
+        // 핵심 드로우 & 업데이트 루프 
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 물리 시뮬레이션 한 스텝 진행
+            world.step(1 / 60);
+
+            if (isGameStarted) {
+                // 카메라가 보고 있는 3인칭 정면 각도 추출 (정방향 계산)
+                const forwardVec = new THREE.Vector3();
+                camera.getWorldDirection(forwardVec);
+                forwardVec.y = 0; 
+                forwardVec.normalize();
+                
+                const rightVec = new THREE.Vector3().crossVectors(camera.up, forwardVec).normalize();
+
+                // 키보드 입력 병합
+                let inputX = moveForce.x;
+                let inputY = moveForce.y;
+                if (keys.ArrowUp || keys.w) inputY = -1;
+                if (keys.ArrowDown || keys.s) inputY = 1;
+                if (keys.ArrowLeft || keys.a) inputX = -1;
+                if (keys.ArrowRight || keys.d) inputX = 1;
+
+                // 물리 엔진 가속 연산
+                const enginePower = 55; 
+                const finalForceX = (rightVec.x * inputX + forwardVec.x * -inputY) * enginePower;
+                const finalForceZ = (rightVec.z * inputX + forwardVec.z * -inputY) * enginePower;
+                ballBody.applyForce(new CANNON.Vec3(finalForceX, 0, finalForceZ), ballBody.position);
+
+                // 떨어졌을 때 낙사 리스폰 구역 설정
+                if (ballBody.position.y < -25) {
+                    ballBody.position.set(0, 4, 0);
+                    ballBody.velocity.set(0, 0, 0);
+                    ballBody.angularVelocity.set(0, 0, 0);
+                }
+            }
+
+            // 물리엔진 상의 연산 결과를 3D 메쉬 오브젝트에 실시간 주입
+            ballMesh.position.copy(ballBody.position);
+            ballMesh.quaternion.copy(ballBody.quaternion);
+
+            // 3인칭 고정 시점 동적 카메라 추적 수식 적용
+            const targetCamX = ballMesh.position.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+            const targetCamY = ballMesh.position.y + camRadius * Math.cos(camPhi);
+            const targetCamZ = ballMesh.position.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+            
+            camera.position.set(targetCamX, targetCamY, targetCamZ);
+            camera.lookAt(ballMesh.position); // 시선은 무조건 공을 향해 고정
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
