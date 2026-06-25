@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>TRICK BALL made by THRE3RIC</title>
+    <style>
+        /* 기본 여백 제거 및 화면 꽉 차게 설정 */
+        body, html { margin: 0; padding: 0; overflow: hidden; background-color: #87CEEB; touch-action: none; }
+        
+        /* 인트로 화면 디자인 */
+        #introScreen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: #111; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; color: white;
+            z-index: 10; transition: opacity 1.5s ease-out;
+        }
+        h1 { font-family: 'Arial Black', sans-serif; font-size: 3rem; margin: 0; letter-spacing: 2px; }
+        p { font-family: 'Arial', sans-serif; font-size: 1.2rem; color: #aaa; margin-top: 10px; margin-bottom: 40px; }
+        button {
+            padding: 15px 40px; font-size: 1.2rem; font-weight: bold; border: none;
+            border-radius: 30px; background-color: white; color: black; cursor: pointer;
+            box-shadow: 0 4px 15px rgba(255,255,255,0.3); transition: transform 0.2s;
+        }
+        button:active { transform: scale(0.95); }
+
+        /* 모바일 터치 조작 영역 (좌/우 반반) */
+        #touchZones { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 5; display: none; }
+        #leftZone { float: left; width: 50%; height: 100%; }
+        #rightZone { float: left; width: 50%; height: 100%; }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"></script>
+</head>
+<body>
+
+    <div id="introScreen">
+        <h1>TRICK BALL</h1>
+        <p>made by THRE3RIC</p>
+        <button onclick="startGame()">START GAME</button>
+    </div>
+
+    <div id="touchZones">
+        <div id="leftZone"></div>
+        <div id="rightZone"></div>
+    </div>
+
+    <script>
+        // --- 1. 기본 변수 설정 ---
+        let scene, camera, renderer;
+        let world, ballBody, ballMesh;
+        let isGameStarted = false;
+
+        // 카메라 컨트롤 변수
+        let camRadius = 15;
+        let camTheta = 0; // 좌우 회전 각도
+        let camPhi = Math.PI / 3; // 상하 각도 (약 60도)
+        
+        // 조작 변수
+        let moveForce = { x: 0, y: 0 };
+        let leftPointerId = null;
+        let leftStartPos = { x: 0, y: 0 };
+        let rightPointerId = null;
+        let rightStartPos = { x: 0, y: 0 };
+
+        init();
+        animate();
+
+        function init() {
+            // --- 2. 3D 그래픽 세팅 (Three.js) ---
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87cefa); // 몽환적인 하늘색 배경
+            scene.fog = new THREE.Fog(0x87cefa, 20, 100); // 안개 효과
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // 조명 설정
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 50, 20);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // --- 3. 물리 엔진 세팅 (Cannon.js) ---
+            world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) }); // 중력
+            
+            // --- 4. 오브젝트 생성 (공과 맵) ---
+            // 4-1. 플레이어 공 만들기
+            const ballRadius = 1;
+            const sphereGeo = new THREE.SphereGeometry(ballRadius, 32, 32);
+            const sphereMat = new THREE.MeshStandardMaterial({ color: 0x4169E1, roughness: 0.3, metalness: 0.7 }); // 파란색 유광 공
+            ballMesh = new THREE.Mesh(sphereGeo, sphereMat);
+            ballMesh.castShadow = true;
+            scene.add(ballMesh);
+
+            const sphereShape = new CANNON.Sphere(ballRadius);
+            ballBody = new CANNON.Body({ mass: 5, shape: sphereShape, position: new CANNON.Vec3(0, 5, 0) });
+            ballBody.linearDamping = 0.3; // 굴러가다 자연스럽게 멈추도록 저항 설정
+            world.addBody(ballBody);
+
+            // 4-2. 시작 플랫폼 (아슬아슬한 길) 만들기
+            createPlatform(0, -1, 0, 10, 2, 40, 0xdddddd);
+            createPlatform(0, -2, -30, 20, 2, 20, 0xaaaaaa); // 연결된 넓은 플랫폼
+
+            // --- 5. 터치 이벤트 (모바일 조작) 세팅 ---
+            setupTouchControls();
+
+            // 반응형 화면 설정
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // 맵 구성요소(플랫폼) 생성 함수
+        function createPlatform(x, y, z, width, height, depth, color) {
+            // 그래픽
+            const geo = new THREE.BoxGeometry(width, height, depth);
+            const mat = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            // 물리 (질량을 0으로 하면 고정됨)
+            const shape = new CANNON.Box(new CANNON.Vec3(width/2, height/2, depth/2));
+            const body = new CANNON.Body({ mass: 0, shape: shape, position: new CANNON.Vec3(x, y, z) });
+            world.addBody(body);
+        }
+
+        function setupTouchControls() {
+            const leftZone = document.getElementById('leftZone');
+            const rightZone = document.getElementById('rightZone');
+
+            // 좌측: 공 이동 (가상 조이스틱 역할)
+            leftZone.addEventListener('pointerdown', (e) => {
+                leftPointerId = e.pointerId;
+                leftStartPos = { x: e.clientX, y: e.clientY };
+            });
+            leftZone.addEventListener('pointermove', (e) => {
+                if (leftPointerId === e.pointerId) {
+                    const deltaX = e.clientX - leftStartPos.x;
+                    const deltaY = e.clientY - leftStartPos.y;
+                    // 최대 한계치 설정 (터치 드래그 강도)
+                    moveForce.x = Math.max(-1, Math.min(1, deltaX / 50));
+                    moveForce.y = Math.max(-1, Math.min(1, deltaY / 50));
+                }
+            });
+            const resetLeft = (e) => { if (leftPointerId === e.pointerId) { leftPointerId = null; moveForce = { x: 0, y: 0 }; }};
+            leftZone.addEventListener('pointerup', resetLeft);
+            leftZone.addEventListener('pointercancel', resetLeft);
+
+            // 우측: 카메라 시점 회전
+            rightZone.addEventListener('pointerdown', (e) => {
+                rightPointerId = e.pointerId;
+                rightStartPos = { x: e.clientX, y: e.clientY };
+            });
+            rightZone.addEventListener('pointermove', (e) => {
+                if (rightPointerId === e.pointerId) {
+                    const deltaX = e.clientX - rightStartPos.x;
+                    const deltaY = e.clientY - rightStartPos.y;
+                    camTheta -= deltaX * 0.01; // 좌우 회전
+                    camPhi -= deltaY * 0.01;   // 상하 회전
+                    // 카메라가 바닥 아래로 가거나 너무 위로 가지 않게 각도 제한
+                    camPhi = Math.max(0.1, Math.min(Math.PI / 2.2, camPhi));
+                    rightStartPos = { x: e.clientX, y: e.clientY }; // 기준점 갱신
+                }
+            });
+            const resetRight = (e) => { if (rightPointerId === e.pointerId) rightPointerId = null; };
+            rightZone.addEventListener('pointerup', resetRight);
+            rightZone.addEventListener('pointercancel', resetRight);
+        }
+
+        // 인트로 화면에서 Start 버튼 클릭 시 호출
+        function startGame() {
+            const intro = document.getElementById('introScreen');
+            intro.style.opacity = '0';
+            setTimeout(() => {
+                intro.style.display = 'none';
+                document.getElementById('touchZones').style.display = 'block';
+                isGameStarted = true;
+            }, 1000);
+        }
+
+        // 매 프레임마다 화면 업데이트 (게임 루프)
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isGameStarted) {
+                // 1. 물리 엔진 계산 업데이트 (60fps 기준)
+                world.step(1 / 60);
+
+                // 2. 카메라 기준 이동 방향 계산 (중요: 시점이 변해도 직관적으로 움직이도록)
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+                forward.y = 0; // 수직 이동 방지
+                forward.normalize();
+                
+                const right = new THREE.Vector3();
+                right.crossVectors(camera.up, forward).normalize();
+
+                // 조이스틱 입력값을 물리적 힘(Force)으로 변환
+                const forceMagnitude = 40; // 굴러가는 힘
+                const forceX = (right.x * moveForce.x + forward.x * -moveForce.y) * forceMagnitude;
+                const forceZ = (right.z * moveForce.x + forward.z * -moveForce.y) * forceMagnitude;
+
+                // 공에 힘 가하기
+                ballBody.applyForce(new CANNON.Vec3(forceX, 0, forceZ), ballBody.position);
+
+                // 3. 물리 엔진의 공 위치를 그래픽(Three.js) 공 위치와 동기화
+                ballMesh.position.copy(ballBody.position);
+                ballMesh.quaternion.copy(ballBody.quaternion);
+
+                // 4. 카메라가 공을 부드럽게 따라다니며 회전하도록 업데이트
+                const camX = ballMesh.position.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+                const camY = ballMesh.position.y + camRadius * Math.cos(camPhi);
+                const camZ = ballMesh.position.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+                
+                camera.position.set(camX, camY, camZ);
+                camera.lookAt(ballMesh.position);
+
+                // 공이 맵 밖으로 떨어지면 리스폰
+                if (ballBody.position.y < -10) {
+                    ballBody.position.set(0, 5, 0);
+                    ballBody.velocity.set(0,0,0);
+                    ballBody.angularVelocity.set(0,0,0);
+                }
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
